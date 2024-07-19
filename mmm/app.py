@@ -8,17 +8,16 @@
 
 import pandas as pd
 import numpy as np
-
+import plotly.graph_objects as go
 import plotly.express as px
 import seaborn as sns
 import dash
-import dash_core_components as dcc
-import dash_html_components as html
+from dash import dcc, html
 from dash.dependencies import Input, Output, State
-
+from matplotlib import pyplot as plt
 import dash_bootstrap_components as dbc
 import dash_daq as daq
-
+from plotnine import *
 import plotly.express as px
 
 import pandas as pd
@@ -32,11 +31,11 @@ import json
 
 # Load Data
 
-# In[75]:
+# In[3]:
 
 
 #simulated_data_df = pd.read_csv("C:/Users/nfole/OneDrive/Desktop/lab_62_mmm_python/data/de_simulated_data.csv")
-simulated_data_df =pd.read_csv("./data/de_simulated_data.csv")
+simulated_data_df  = pd.read_csv("https://raw.githubusercontent.com/analytic-nick/marketing_analytics/main/mmm/data/de_simulated_data.csv")
 
 
 # # STEP 1.0 DATA UNDERSTANDING 
@@ -54,7 +53,7 @@ simulated_data_df['date'] = pd.to_datetime(simulated_data_df['date'])
 
 #  Visualize Time Series Data
 
-# In[11]:
+# In[9]:
 
 
 simulated_data_df \
@@ -75,7 +74,7 @@ simulated_data_df \
 
 # Visualize Current Spend Profile
 
-# In[14]:
+# In[13]:
 
 
 media_spend_df = simulated_data_df \
@@ -97,12 +96,13 @@ media_spend_df \
 
 # Add/Remove Features for Modeling
 
-# In[17]:
+# In[15]:
 
 
 df = simulated_data_df \
     .assign(date_month = lambda x: x['date'].dt.month_name()) \
-    .drop(["date", "search_clicks_p", "facebook_i"], axis = 1)
+    .drop([ "search_clicks_p", "facebook_i"], axis = 1)
+
 
 
 # # STEP 2.0 MODELING WITH ADSTOCK -
@@ -154,7 +154,8 @@ from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 # In[30]:
 
 
-X = pd.concat([adstock_tv_s, adstock_ooh_s, adstock_print_s, adstock_search_s, adstock_facebook_s, df.competitor_sales_b, pd.get_dummies(df.date_month)], axis=1) 
+X = pd.concat([adstock_tv_s, adstock_ooh_s, adstock_print_s, adstock_search_s, adstock_facebook_s,df.date, df.competitor_sales_b, pd.get_dummies(df.date_month)], axis=1) 
+X.set_index('date', inplace=True) 
 
 y = df.revenue
 
@@ -163,9 +164,23 @@ X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=0)
 X_test.shape
 
 
+
+# In[32]:
+
+
+df2=X \
+.filter(regex = '_s$' , axis = 1)
+df2 = df2.reset_index()
+
+df2=df2\
+    .melt(
+        id_vars="date"
+    ) 
+
+
 # Build Model
 
-# In[33]:
+# In[35]:
 
 
 pipeline_lm = Pipeline(
@@ -184,7 +199,7 @@ y_pred_train = pipeline_lm.predict(X_train)
 
 # Score Predictions on Test Set
 
-# In[36]:
+# In[38]:
 
 
 mean_absolute_error(y_test, y_pred_test)
@@ -192,7 +207,7 @@ np.sqrt(mean_squared_error(y_test, y_pred_test))
 r2_score(y_test, y_pred_test)
 
 
-# In[38]:
+# In[40]:
 
 
 # Coefficients to the Model
@@ -203,7 +218,7 @@ pipeline_lm['lm'].coef_
 
 # Search Adstock Rate (Optimize for Model Fit)
 
-# In[41]:
+# In[43]:
 
 
 rng = np.random.default_rng(123)
@@ -283,6 +298,9 @@ def adstock_search(df, grid, verbose = False):
 best_model = adstock_search(df, adstock_grid_df, verbose= True)
 
 
+# Media Spend Rebalanced
+# 
+
 # In[49]:
 
 
@@ -297,12 +315,6 @@ rebalancing_coef_df = pd.DataFrame(dict(
     .filter(regex = "_s$", axis=0) \
     .assign(value = lambda x: x['value'] / np.sum(x['value'])) \
     .reset_index()
-
-
-# Media Spend Rebalanced
-# 
-
-# In[52]:
 
 
 total_current_spend = media_spend_df['spend_current'].sum()
@@ -327,10 +339,32 @@ media_spend_rebalanced_df \
     
 
 
+# In[52]:
+
+
+df3=pd.merge(df2,rebalancing_coef_df, how='left',left_on=['variable'],right_on=['name'])
+df3["contribution"]=df3.value_x * df3.value_y
+
+
+# In[54]:
+
+
+df4 = pd.DataFrame(df3, columns=['date', 'variable', 'contribution'])\
+    .set_index('date')\
+    .sort_values('date')
+
+df4["label"]=df4.variable.str.replace('adstock_', '')
+
+pt = pd.pivot_table(df4, columns=['label'], index=['date'], values=['contribution'], fill_value=0)
+
+df4 = df4.reset_index()
+fig_area=pt.plot.area()
+
+
 # Predicted Revenue after Rebalancing
 # 
 
-# In[55]:
+# In[57]:
 
 
 X_train_adstock = X_train[X_train.columns[X_train.columns.str.startswith('adstock_')]]
@@ -359,7 +393,7 @@ predicted_revenue_new / predicted_revenue_current
 
 # Search for optimal budget for media channels
 
-# In[59]:
+# In[61]:
 
 
 rng = np.random.default_rng(123)
@@ -373,13 +407,13 @@ budget_grid_df = pd.DataFrame(dict(
 ))
 
 
-for i, row in enumerate(budget_grid_df.index):
-    print(budget_grid_df.loc[i, :] / np.sum(budget_grid_df.loc[i, :]))
+#for i, row in enumerate(budget_grid_df.index):
+#    print(budget_grid_df.loc[i, :] / np.sum(budget_grid_df.loc[i, :]))
 
 
 # Function to calculate new media spend numbers
 
-# In[61]:
+# In[64]:
 
 
 def optimize_budget(df, grid, media_spend, verbose = True):
@@ -448,7 +482,7 @@ def optimize_budget(df, grid, media_spend, verbose = True):
     return best_budget
 
 
-# In[64]:
+# In[66]:
 
 
 budget_optimized = optimize_budget(
@@ -474,7 +508,7 @@ budget_optimized['media_spend_rebal'] \
 
 # # STEP 5.0 App
 
-# In[66]:
+# In[81]:
 
 
 # APP SETUP
@@ -494,7 +528,7 @@ LOGO = "https://www.business-science.io/img/business-science-logo.png"
 
 # Functions
 
-# In[68]:
+# In[84]:
 
 
 def generate_grid(size = 10):
@@ -575,14 +609,13 @@ def optimize_budget(df, grid, media_spend, verbose = True):
 
     return best_budget
 
+fig2 = px.area(df4, x="date", y="contribution", color="label", template='plotly_dark',title="Contribution by Media Channel",height=400)
 
 
 # Build the app
 
-# In[70]:
+# In[87]:
 
-
-# APP
 
 navbar = dbc.Navbar(
     [
@@ -656,16 +689,21 @@ app.layout = html.Div(
                     width = 3,
                     style={'margin':'10px'}
                 ),
-                dbc.Col(
+                dbc.Col([
                     # dcc.Graph(id='graph-slider'),
-                    dcc.Graph(id='spend-graph'),
-                    width = 8
-                ),
+                    dcc.Graph(id='spend-graph',style={'width': '100%', 'height': '65vh'}),
+                    html.Br(),
+                    dcc.Graph(figure=fig2,style={'width': '100%', 'height': '65vh'})
+                    
+                ],width = 8),
                 dcc.Store(id='intermediate-value')
             ] 
         )
     ]
 )
+
+
+# In[89]:
 
 
 @app.callback(
@@ -709,10 +747,15 @@ def update_figure(budget_optimized_json):
             y = 'value',
             color = 'media', 
             barmode = 'group',
-            template = 'plotly_dark'
+            template = 'plotly_dark',
+            title= "Spend: Current Plan vs Optimized"
+           
         ) 
-    
+
     return fig
+
+
+
 
 @app.callback(
     Output('digital-score', component_property='value'),
@@ -735,9 +778,27 @@ def toggle_navbar_collapse(n, is_open):
     return is_open
 
 
-# In[71]:
+# In[91]:
+
+
+app.run_server(port=4000)
+
+
+# In[93]:
 
 
 if __name__ == '__main__':
-    app.run_server(debug=True)
+    app.run_server(debug=True,port=4000)
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
 
