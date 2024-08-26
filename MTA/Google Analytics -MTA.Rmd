@@ -1,0 +1,168 @@
+---
+title: "Google Analytics - MTA"
+output: html_document
+date: "2024-08-26"
+---
+
+## Step 1: Set up Environment
+
+```{r setup, include=FALSE}
+
+# Channel Attribution
+library(ChannelAttribution)
+
+# Databases
+library(bigrquery)
+library(DBI)
+library(connections)
+library(jsonlite)
+
+# Core
+library(tidyverse)
+library(tidyquant)
+library(lubridate)
+library(plotly)
+
+# dplyr helpers
+library(dbplyr) # Database backend
+library(dtplyr) # Big Data
+
+```
+
+## Step 2: Load Data
+
+
+
+```{r}
+library(readr)
+query_tbl<- read_csv("C:/Users/nfole/OneDrive/Desktop/MTA/data/bigquery_data.csv")
+```
+
+## Step 3: Data Prep
+
+
+```{r}
+# Apply Cleaning Steps
+query_clean_tbl <- query_tbl %>% 
+    mutate(traffic_source_clean = traffic_source %>% 
+               str_to_lower() %>%
+               str_replace("\\.com", "") %>%
+               str_replace("^m\\.", "")) %>%
+    mutate(traffic_source_clean = case_when(
+        str_detect(traffic_source_clean, "\\.google") ~ "google_product",
+        str_detect(traffic_source_clean, "google\\.") ~ "google",
+        str_detect(traffic_source_clean, "facebook") ~ "facebook",
+        TRUE ~ traffic_source_clean
+    )) %>%
+    mutate(traffic_source_clean = traffic_source_clean %>%
+               as_factor() %>%
+               fct_lump(n = 3, other_level = "other_source"))
+
+query_dtplyr <- query_clean_tbl %>% dtplyr::lazy_dt()
+
+
+```
+
+## Step 4: Create Visitor Paths
+
+### 4.1 VISITOR-DATE-CHANNEL MANIPULATION
+
+```{r}
+
+visitor_date_channelgrouping_dtplyr <- query_dtplyr %>%
+    
+    # Fix date from BigQuery
+    mutate(date = ymd(date)) %>%
+    
+    # Add Channel-Traffic Source Combo
+    mutate(channel_source = str_c(channelGrouping, "-", traffic_source_clean)) %>%
+    
+    # Select Important columns
+    select(fullVisitorId, date, channel_source, total_transactions, total_transaction_revenue) %>%
+    
+    # Fix revenue
+    mutate(total_transaction_revenue = total_transaction_revenue / 1e6) %>%
+    
+    # Path Calculations
+    group_by(fullVisitorId, date, channel_source) %>%
+    mutate(total_transactions = sum(total_transactions, na.rm = TRUE)) %>%
+    mutate(total_transaction_revenue = sum(total_transaction_revenue, na.rm = TRUE)) %>%
+    arrange(date) %>%
+    ungroup() %>%
+    
+    # Binary Conversion (Yes/No)
+    mutate(total_transactions = ifelse(total_transactions > 0, 1, 0))
+
+visitor_date_channelgrouping_tbl <- as_tibble(visitor_date_channelgrouping_dtplyr)
+visitor_date_channelgrouping_tbl
+```
+
+### 4.2 Create Visitor Full path
+
+```{r}
+
+channel_path_dtplyr <- visitor_date_channelgrouping_dtplyr %>%
+    
+    group_by(fullVisitorId) %>%
+    summarize(
+        channel_path     = str_c(channel_source, collapse = " > "),
+        conversion_total = sum(total_transactions),
+        conversion_null  = sum(total_transactions == 0),
+        conversion_value = sum(total_transaction_revenue),
+        n_channel_path   = n()
+    ) %>%
+    ungroup() 
+
+channel_path_tbl <- channel_path_dtplyr %>% as_tibble()
+
+channel_path_tbl
+```
+
+
+
+
+
+## Step 5: CHANNEL ATTRIBUTION MODELING 
+
+### Function to Plot results
+
+```{r}
+# 5.1 Plotting Utility ----
+plot_attribution <- function(data, title = "Attribution Model", interactive = TRUE) {
+    g <- data %>%
+        pivot_longer(
+            cols = -channel_name,
+            names_to  = "conversion_type",
+            values_to = "conversion_value"
+        ) %>%
+        mutate(channel_name = as_factor(channel_name) %>% fct_reorder(conversion_value)) %>%
+        
+        ggplot(aes(channel_name, conversion_value, fill = conversion_type)) +
+        geom_col(position = "dodge") +
+        theme_tq() +
+        scale_fill_tq() +
+        coord_flip() +
+        labs(title = title)
+    
+    if (interactive) return(ggplotly(g))
+    else return(g)
+}
+```
+
+### Heurisitic Models(first touch, last touch, linear)
+```{r}
+
+
+channel_path_heuristic_model <- channel_path_tbl %>%
+    heuristic_models(
+        var_path = "channel_path",
+        var_conv = "conversion_total",
+        var_value = "conversion_value",
+        sep = ">"
+    )
+
+channel_path_heuristic_model %>%
+    select_at(vars(channel_name, matches("conversions"))) %>%
+    plot_attribution()
+
+```
